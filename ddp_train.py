@@ -2,9 +2,8 @@ import os
 import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
-from transformers import PreTrainedTokenizer, AutoTokenizer
+from transformers import AutoTokenizer
 import wandb
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -141,27 +140,32 @@ def cleanup():
     dist.destroy_process_group()
 
 
-def main_worker(rank, world_size, transformer_config, start_epoch, session_epochs, tokenizer, train_size=None):
+def main_worker(
+        rank, world_size, tokenizer, transformer_config,
+        batch_size=128, warmup_steps=4000, session_epochs=2,
+        train_size=None, val_size=None
+) -> None:
     setup(rank, world_size)
 
     datamanager = DataPreprocessing(
         tokenizer,
-        batch_size=128,
+        batch_size=batch_size,
         max_length=512,
         dataset_kwargs={'path': 'wmt14', 'name': 'de-en'},
         kwargs={}
     )
 
-    train_dataloader = get_dataloader(datamanager, 'train', size=1024, world_size=world_size, rank=rank)
-    val_dataloader = get_dataloader(datamanager, 'validation', size=512, world_size=world_size, rank=rank)
+    train_dataloader = get_dataloader(datamanager, 'train', size=train_size, wrld_size=world_size, rank=rank)
+    val_dataloader = get_dataloader(datamanager, 'validation', size=val_size, wrld_size=world_size, rank=rank)
 
     model = get_model(transformer_config).to(rank)
     model = nn.parallel.DistributedDataParallel(model, device_ids=[rank])
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=transformer_config.emb_size ** -0.5, betas=(0.9, 0.98),
-                                  eps=1e-9)
-    scheduler = get_lr_scheduler(optimizer, 40)
-    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id, reduction='sum')
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=transformer_config.emb_size ** -0.5, betas=(0.9, 0.98), eps=1e-9
+    )
+    scheduler = get_lr_scheduler(optimizer, warmup_steps)
+    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id, reduction='mean')
 
     model, optimizer, scheduler, start_epoch = load_checkpoint(model, optimizer, scheduler, 'checkpoint.pt')
 
@@ -202,7 +206,17 @@ if __name__ == '__main__':
     }
     transformer_config = easydict.EasyDict(transformer_config)
 
+    batch_size = 128
+    warmup_steps = 4000
+    train_size = 1024
+    val_size = 512
+    session_epochs = 2
+
     mp.spawn(main_worker,
-             args=(world_size, transformer_config, 1, 2, tokenizer),
+             args=(
+                 world_size, tokenizer, transformer_config,
+                 batch_size, warmup_steps, session_epochs,
+                 train_size, val_size
+             ),
              nprocs=world_size,
              join=True)
