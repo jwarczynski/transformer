@@ -9,21 +9,24 @@ import wandb
 
 from model import CausalTransformer
 from datamanager import DataPreprocessing, get_dataloader
+from utils import get_logger
 
 import easydict
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+logger = get_logger(__name__)
 
 
 def load_checkpoint(model, optimizer, scheduler, path):
-    epoch = 0
+    epoch = 1
     if os.path.exists(path):
+        logger.info(f'Loading checkpoint from {path}')
         checkpoint = torch.load(path)
 
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        epoch = checkpoint['epoch']
+        epoch = checkpoint['epoch'] + 1
 
     return nn.DataParallel(model), optimizer, scheduler, epoch
 
@@ -77,19 +80,19 @@ def save_checkpoint(model, optimizer, scheduler, epoch, path):
     # print(f'Saving checkpoint at epoch {epoch}')
     torch.save({
         'epoch': epoch,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': model.module.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
     }, path)
 
 
-def train_one_epoch(model, dataloader, loss_fn, optimizer, scheduler, batch_size):
+def train_one_epoch(model, dataloader, loss_fn, optimizer, scheduler, epoch):
     model.train()
     total_loss = 0
     current_loss = 0
     progress_bar = tqdm(
         dataloader,
-        desc=f'total_loss: {total_loss}, current_loss: {current_loss}, lr: {optimizer.param_groups[0]["lr"]}'
+        desc=f'epoch: {epoch}, total_loss: {total_loss}, current_loss: {current_loss}, lr: {optimizer.param_groups[0]["lr"]}'
     )
     for batch in progress_bar:
         optimizer.zero_grad()
@@ -109,15 +112,21 @@ def train_one_epoch(model, dataloader, loss_fn, optimizer, scheduler, batch_size
         scheduler.step()
 
         progress_bar.set_description(
-            f'total_loss: {total_loss:.4f}, current_loss: {current_loss:.4f}, lr: {optimizer.param_groups[0]["lr"]:.6f}'
+            f'epoch: {epoch}, total_loss: {total_loss:.4f}, current_loss: {current_loss:.4f}, lr: {optimizer.param_groups[0]["lr"]:.6f}'
         )
 
-        wandb.log({'loss': current_loss})
+        wandb.log({
+            'batch_loss': current_loss,
+            'lr': optimizer.param_groups[0]['lr']
+        })
+
+    total_loss /= len(dataloader)
+    wandb.log({'epoch_train_loss': total_loss})
 
 
-def train(model, loss_fn, optimizer, scheduler, train_dataloader, val_dataloader, batch_size, epochs: iter):
+def train(model, loss_fn, optimizer, scheduler, train_dataloader, val_dataloader, epochs: iter):
     for epoch in epochs:
-        train_one_epoch(model, train_dataloader, loss_fn, optimizer, scheduler, batch_size)
+        train_one_epoch(model, train_dataloader, loss_fn, optimizer, scheduler, epoch)
         evaluate(model, val_dataloader, loss_fn)
         save_checkpoint(model, optimizer, scheduler, epoch, f'checkpoint.pt')
 
@@ -126,7 +135,7 @@ if __name__ == '__main__':
     tokenizer_path = 'bert-base-uncased'
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
-    transfomrer_config = {
+    transformer_config = {
         'num_encoder_layers': 6,
         'num_decoder_layers': 6,
         'n_heads': 8,
@@ -138,28 +147,49 @@ if __name__ == '__main__':
         'dropout': 0.1,
     }
 
-    transfomrer_config = easydict.EasyDict(transfomrer_config)
+    transformer_config = easydict.EasyDict(transformer_config)
 
-    d_model = transfomrer_config.emb_size
+    d_model = transformer_config.emb_size
     learning_rate = (d_model ** -0.5)
-    batch_size = 4
+    batch_size = 128
     warmup_steps = 40
     epochs = 1
+    session_epochs = 2
 
     datamanager = DataPreprocessing(
         tokenizer,
-        512,
+        batch_size=batch_size,
         max_length=512,
         dataset_kwargs={'path': 'wmt14', 'name': 'de-en'},
         kwargs={}
     )
-    train_dataloader = get_dataloader(datamanager, 'train')
-    val_dataloader = get_dataloader(datamanager, 'validation')
+    train_dataloader = get_dataloader(datamanager, 'train', size=1024)
+    val_dataloader = get_dataloader(datamanager, 'validation', size=512)
 
-    model = get_model(transfomrer_config).to(device)
+    model = get_model(transformer_config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, betas=(0.9, 0.98), eps=1e-9)
     scheduler = get_lr_scheduler(optimizer, warmup_steps)
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id, reduction='sum')
 
-    print('Start training on device:', device)
-    train(model, loss_fn, optimizer, scheduler, train_dataloader, val_dataloader, batch_size, range(epochs))
+    model, optimizer, scheduler, start_epoch = load_checkpoint(model, optimizer, scheduler, 'checkpoint.pt')
+    
+    wandb.init(
+        project="transformer-hgx",
+        config={
+            'model': 'causal-transformer-fix',
+            'dataset': 'wmt14',
+        },
+        name='causal-transformer-fix',
+        notes='fixing attention',
+    )
+    wandb.watch(model, criterion=loss_fn, log='all', log_graph=True)
+
+    logger.info('Start training on device: {}', device)
+    logger.info(f"Available GPUs: {torch.cuda.device_count()}")
+
+    logger.info(f'Starting training from epoch {start_epoch} for {session_epochs} epochs')
+    train(
+        model, loss_fn, optimizer, scheduler,
+        train_dataloader, val_dataloader,
+        range(start_epoch, start_epoch + session_epochs)
+    )
