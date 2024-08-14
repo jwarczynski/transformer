@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-# TODO: add beam search
 # TODO: add BLEU score
 
 
