@@ -141,7 +141,7 @@ def create_dataloader(tokenizer, batch_size, size, split='train', max_length=512
 
 
 def get_dataloader(
-        data_manager: DataPreprocessing, split: str, wrld_size: int = None, rank: int = None, size: int = None
+        data_manager: DataPreprocessing, split: str, size: int = None, wrld_size: int = None, rank: int = None
 ):
     split_data, buckets = data_manager(split, size=size)
     if wrld_size is None or rank is None:
