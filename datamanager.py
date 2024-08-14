@@ -8,14 +8,14 @@ import math
 
 
 class BucketBatchSampler(Sampler):
-    def __init__(self, datasets, batch_size, shuffle=True):
+    def __init__(self, dataset_chunks, batch_size, shuffle=True):
         """
         datasets: List of individual bucket datasets.
         batch_size: Desired batch size.
         shuffle: Whether to shuffle the data within each bucket.
         """
         super().__init__()
-        self.datasets = datasets
+        self.datasets = dataset_chunks
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.bucket_indices = self._prepare_indices()
@@ -44,6 +44,29 @@ class BucketBatchSampler(Sampler):
         return sum(math.ceil(len(dataset) / self.batch_size) for dataset in self.datasets)
 
 
+class DistributedBucketBatchSampler(BucketBatchSampler):
+    def __init__(self, dataset_chunks, batch_size, world_size, rank, shuffle=True):
+        """
+        datasets: List of individual bucket datasets.
+        batch_size: Desired batch size.
+        world_size: Number of processes (GPUs) participating in the training.
+        rank: Rank of the current process.
+        shuffle: Whether to shuffle the data within each bucket.
+        """
+        super().__init__(dataset_chunks, batch_size, shuffle)
+        self.world_size = world_size
+        self.rank = rank
+        self.bucket_indices = self.bucket_indices[self.rank::self.world_size]
+
+    def __iter__(self):
+        for batch in self.bucket_indices:
+            yield batch
+
+    def __len__(self):
+        # Each process will handle a portion of the batches
+        return len(self.bucket_indices)
+
+
 class DataPreprocessing:
     def __init__(self, tokenizer, batch_size, max_length, dataset_kwargs, kwargs, train_size=None, ):
         self.tokenizer = tokenizer
@@ -66,12 +89,15 @@ class DataPreprocessing:
         split_data = self.load_split(split, size, seed)
         split_data = split_data.flatten()
         split_data = split_data.map(
-            lambda x: {'de_sentence_len': len(x['translation.de'].split())}, num_proc=os.cpu_count()
+            lambda x: {'de_sentence_len': len(x['translation.de'].split())},
+            num_proc=os.cpu_count()
         ).sort('de_sentence_len')
 
         split_data = split_data.map(
             lambda batch: self.tokenize(batch, self.tokenizer),
-            batched=True, batch_size=self.batch_size, remove_columns=['translation.de', 'translation.en']
+            batched=True,
+            batch_size=self.batch_size,
+            remove_columns=['translation.de', 'translation.en', 'de_sentence_len'],
         )
 
         split_data.set_format('torch', columns=['input_ids_en', 'input_ids_de'])
@@ -114,7 +140,13 @@ def create_dataloader(tokenizer, batch_size, size, split='train', max_length=512
     return dataloader
 
 
-def get_dataloader(data_manager: DataPreprocessing, split: str, size: int = None):
+def get_dataloader(
+        data_manager: DataPreprocessing, split: str, wrld_size: int = None, rank: int = None, size: int = None
+):
     split_data, buckets = data_manager(split, size=size)
-    sampler = BucketBatchSampler(buckets, data_manager.batch_size, shuffle=True)
+    if wrld_size is None or rank is None:
+        sampler = DistributedBucketBatchSampler(buckets, data_manager.batch_size, shuffle=True)
+    else:
+        sampler = DistributedBucketBatchSampler(buckets, data_manager.batch_size, wrld_size, rank, shuffle=True)
+
     return DataLoader(split_data, batch_sampler=sampler)
