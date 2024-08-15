@@ -127,6 +127,7 @@ class DataPreprocessing:
         return [split.select(range(i, min((i + batch_size), len(split)))) for i in range(0, len(split), batch_size)]
 
 
+# THIS is stupid, when I want subsequent split dataloader, entire mappings are performed second time
 def create_dataloader(tokenizer, batch_size, size, split='train', max_length=512, seed=None, shuffle=True):
     dataset_kwargs = {
         'path': 'wmt14',
@@ -145,7 +146,7 @@ def get_dataloader(
 ):
     split_data, buckets = data_manager(split, size=size)
     if wrld_size is None or rank is None:
-        sampler = DistributedBucketBatchSampler(buckets, data_manager.batch_size, shuffle=True)
+        sampler = BucketBatchSampler(buckets, data_manager.batch_size, shuffle=True)
     else:
         sampler = DistributedBucketBatchSampler(buckets, data_manager.batch_size, wrld_size, rank, shuffle=True)
 
