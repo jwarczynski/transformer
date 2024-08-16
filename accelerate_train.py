@@ -75,6 +75,51 @@ def evaluate(model, val_dataloader, loss_fn):
     return loss.item(), perplexity.item()
 
 
+def train(model, optimizer, scheduler, loss_fn, train_loader, val_loader, args):
+    model.train()
+    completed_steps = 0
+    samples_per_step = accelerator.state.num_processes * args.train_batch_size
+    for step, batch in enumerate(train_loader, start=1):
+        src = batch['input_ids_en']
+        trg = batch['input_ids_de'][:, :-1]
+        labels = batch['input_ids_de'][:, 1:]
+
+        logits = model(src, trg)
+        loss = loss_fn(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
+        loss = loss / args.gradient_accumulation_steps
+        accelerator.backward(loss)
+
+        log_metrics(step, {'lr': get_lr(), 'samples': samples_per_step * step, 'steps': completed_steps,
+                           'loss/train': loss.item()})
+
+        if step % args.gradient_accumulation_steps == 0:
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+            completed_steps += 1
+
+        if step % args.save_checkpoint_steps == 0:
+            logger.info('Evalating and saving model')
+            eval_loss, perplexity = evaluate(model, val_loader, loss_fn)
+            log_metrics(step, {'loss/eval': eval_loss, 'perplexity/eval': perplexity})
+            accelerator.wait_for_everyone()
+            unwrapped_model = accelerator.unwrap_model(model)
+            if accelerator.is_main_process:
+                save_checkpoint(unwrapped_model, optimizer, scheduler, completed_steps)
+            model.train()
+
+        if completed_steps >= args.max_train_steps > 0:
+            break
+
+    logger.info('Evalating and saving model after training')
+    eval_loss, perplexity = evaluate(model, val_dataloader, loss_fn)
+    log_metrics(step, {'loss/eval': eval_loss, 'perplexity/eval': perplexity})
+    accelerator.wait_for_everyone()
+    unwrapped_model = accelerator.unwrap_model(model)
+    if accelerator.is_main_process:
+        save_checkpoint(unwrapped_model, optimizer, scheduler, completed_steps)
+
+
 def save_checkpoint(model, optimizer, scheduler, completed_steps, path=None):
     path = f'checkpoints/checkpoint-{completed_steps}.pt' if path is None else path
     if accelerator.is_main_process:
@@ -137,8 +182,6 @@ if __name__ == "__main__":
 
     set_seed(args.seed)
 
-    samples_per_step = accelerator.state.num_processes * args.train_batch_size
-
     st = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     logger, run_name = setup_logging("transformer-accelerate", f"logs/transformer-accelerate-{st}.log")
     logger.info(accelerator.state)
@@ -153,56 +196,4 @@ if __name__ == "__main__":
         model, optimizer, train_dataloader, val_dataloader
     )
 
-    from tqdm import tqdm
-
-    model.train()
-    completed_steps = 0
-
-    # p_bar = tqdm(
-    #     train_dataloader,
-    #     # desc=f'Step: {step}, completed_steps: {completed_steps}, loss: {loss}, lr: {scheduler.get_last_lr()}'
-    # )
-
-    for step, batch in enumerate(train_dataloader, start=1):
-        src = batch['input_ids_en']
-        trg = batch['input_ids_de'][:, :-1]
-        labels = batch['input_ids_de'][:, 1:]
-
-        logits = model(src, trg)
-        loss = loss_fn(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
-        loss = loss / args.gradient_accumulation_steps
-        accelerator.backward(loss)
-
-        log_metrics(step, {'lr': get_lr(), 'samples': samples_per_step * step, 'steps': completed_steps,
-                           'loss/train': loss.item()})
-
-        if step % args.gradient_accumulation_steps == 0:
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
-            completed_steps += 1
-
-        if step % args.save_checkpoint_steps == 0:
-            logger.info('Evalating and saving model')
-            eval_loss, perplexity = evaluate(model, val_dataloader, loss_fn)
-            log_metrics(step, {'loss/eval': eval_loss, 'perplexity/eval': perplexity})
-            accelerator.wait_for_everyone()
-            unwrapped_model = accelerator.unwrap_model(model)
-            if accelerator.is_main_process:
-                save_checkpoint(unwrapped_model, optimizer, scheduler, completed_steps)
-            model.train()
-
-        if completed_steps >= args.max_train_steps > 0:
-            break
-
-        # print(f'Step: {step}, completed_steps: {completed_steps}, loss: {loss}, lr: {scheduler.get_last_lr()}')
-        # p_bar.set_description(f'Step: {step}, completed_steps: {completed_steps}, loss: {loss}, lr: {scheduler.get_last_lr()}')
-
-    logger.info('Evalating and saving model after training')
-    eval_loss, perplexity = evaluate(model, val_dataloader, loss_fn)
-    log_metrics(step, {'loss/eval': eval_loss, 'perplexity/eval': perplexity})
-    accelerator.wait_for_everyone()
-    unwrapped_model = accelerator.unwrap_model(model)
-    if accelerator.is_main_process:
-        save_checkpoint(unwrapped_model, optimizer, scheduler, completed_steps)
-
+    train(model, optimizer, scheduler, loss_fn, train_dataloader, val_dataloader, args)
