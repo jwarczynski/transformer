@@ -118,7 +118,7 @@ if __name__ == "__main__":
         "max_eval_steps": -1,
         "seq_length": 512,
         "seed": 1,
-        "save_checkpoint_steps": 16 * 8 * 100,
+        "save_checkpoint_steps": 8 * 100,
         "train_size": None,
         "valid_size": None,
     }
@@ -182,7 +182,7 @@ if __name__ == "__main__":
             optimizer.zero_grad()
             completed_steps += 1
 
-        if completed_steps % args.save_checkpoint_steps == 0:
+        if step % args.save_checkpoint_steps == 0:
             logger.info('Evalating and saving model')
             eval_loss, perplexity = evaluate(model, val_dataloader, loss_fn)
             log_metrics(step, {'loss/eval': eval_loss, 'perplexity/eval': perplexity})
