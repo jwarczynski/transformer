@@ -1,3 +1,5 @@
+import argparse
+import os.path
 from datetime import datetime
 from accelerate import Accelerator
 import logging
@@ -14,7 +16,7 @@ from accelerate.utils import set_seed
 from datamanager import DataPreprocessing, get_dataloader
 
 
-def setup_logging(project_name, log_file=None):
+def setup_logging(project_name, run_name=None, log_file=None):
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
@@ -24,7 +26,7 @@ def setup_logging(project_name, log_file=None):
     logger = logging.getLogger(__name__)
 
     if accelerator.is_main_process:
-        wandb.init(project=project_name, config=args, name='night training')
+        wandb.init(project=project_name, config=train_args, name=run_name)
         run_name = wandb.run.name
         logger.setLevel(logging.INFO)
         datasets.utils.logging.set_verbosity_warning()
@@ -61,9 +63,9 @@ def evaluate(model, val_dataloader, loss_fn):
 
         logits = model(src, trg)
         loss = loss_fn(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
-        loss = loss.repeat(args.valid_batch_size)
+        loss = loss.repeat(train_args.valid_batch_size)
         losses.append(accelerator.gather(loss))
-        if 0 < args.max_eval_steps <= step:
+        if 0 < train_args.max_eval_steps <= step:
             break
 
     loss = torch.mean(torch.cat(losses))
@@ -77,9 +79,9 @@ def evaluate(model, val_dataloader, loss_fn):
 
 def train(model, optimizer, scheduler, loss_fn, train_loader, val_loader, args):
     model.train()
-    completed_steps = 0
+    completed_steps = args.starting_step // args.gradient_accumulation_steps
     samples_per_step = accelerator.state.num_processes * args.train_batch_size
-    for step, batch in enumerate(train_loader, start=1):
+    for step, batch in enumerate(train_loader, start=args.starting_step):
         src = batch['input_ids_en']
         trg = batch['input_ids_de'][:, :-1]
         labels = batch['input_ids_de'][:, 1:]
@@ -105,7 +107,8 @@ def train(model, optimizer, scheduler, loss_fn, train_loader, val_loader, args):
             accelerator.wait_for_everyone()
             unwrapped_model = accelerator.unwrap_model(model)
             if accelerator.is_main_process:
-                save_checkpoint(unwrapped_model, optimizer, scheduler, completed_steps)
+                save_checkpoint(unwrapped_model, optimizer, scheduler, completed_steps,
+                                path=f'{train_args.save_checkpoint_dir}/checkpoint-{step}.pt')
             model.train()
 
         if completed_steps >= args.max_train_steps > 0:
@@ -117,7 +120,9 @@ def train(model, optimizer, scheduler, loss_fn, train_loader, val_loader, args):
     accelerator.wait_for_everyone()
     unwrapped_model = accelerator.unwrap_model(model)
     if accelerator.is_main_process:
-        save_checkpoint(unwrapped_model, optimizer, scheduler, completed_steps)
+        save_checkpoint(
+            unwrapped_model, optimizer, scheduler, completed_steps,
+            path=f'{train_args.save_checkpoint_dir}/checkpoint-{step}.pt')
 
 
 def save_checkpoint(model, optimizer, scheduler, completed_steps, path=None):
@@ -131,10 +136,95 @@ def save_checkpoint(model, optimizer, scheduler, completed_steps, path=None):
         }, path)
 
 
+def load_checkpoint(model, optimizer, scheduler, path):
+    step = 1
+    if path is not None:
+        logger.info(f'Loading checkpoint from {path}')
+        checkpoint = torch.load(path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        step = checkpoint['step'] + 1
+    return model, optimizer, scheduler, step
+
+
+def find_last_checkpoint(checkpoint_dir):
+    if not os.path.exists(checkpoint_dir):
+        logger.warning(f'Checkpoint directory {checkpoint_dir} does not exist')
+        return None
+    files = os.listdir(checkpoint_dir)
+    files = [f for f in files if f.startswith('checkpoint-') and f.endswith('.pt')]
+    if len(files) == 0:
+        logger.warning(f'No checkpoints found in {checkpoint_dir}')
+        return None
+    files.sort()
+    last_chckpt = os.path.join(checkpoint_dir, files[-1])
+    logger.info(f'Found last checkpoint at {last_chckpt}')
+    return last_chckpt
+
+
+def int_or_none(value):
+    if value == '' or value is None:
+        return None
+    return int(value)
+
+
+def str_or_none(value):
+    if value == '' or value is None:
+        return None
+    return value
+
+
+def dir_path(value, create=False):
+    if os.path.exists(value):
+        return value
+    if create:
+        os.makedirs(value, exist_ok=True)
+        return value
+    raise argparse.ArgumentTypeError(f"Directory {value} does not exist")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('--create_dirs', '-cds', action='store_true', default=True,
+                        help='Create directories if they do not exist')
+    parser.add_argument('--checkpoint_dir', '-cd', type=dir_path, default='checkpoints',
+                        help='Directory to save and load checkpoints')
+    parser.add_argument('--log-dir', '-ld', type=dir_path, default='logs', help='Directory to save logs')
+
+    parser.add_argument('--dataset_train_size', '-dts', type=int_or_none, default=16,
+                        help='Size of the training dataset')
+    parser.add_argument('--dataset_valid_size', '-dvs', type=int_or_none, default=16,
+                        help='Size of the validation dataset')
+
+    parser.add_argument('--train_batch_size', '-tbs', type=int, default=2, help='Batch size for training')
+    parser.add_argument('--valid_batch_size', '-vbs', type=int, default=2, help='Batch size for validation')
+    parser.add_argument('--gradient_accumulation_steps', '-gas', type=int, default=2,
+                        help='Number of steps to accumulate gradients')
+    parser.add_argument('--save_checkpoint_steps', '-scs', type=int, default=2 * 2,
+                        help='Number of steps to save a checkpoint')
+
+    parser.add_argument('--max_train_steps', '-mts', type=int, default=-1,
+                        help='Maximum number of training steps (-1 for unlimited)')
+    parser.add_argument('--max_eval_steps', '-mes', type=int, default=-1,
+                        help='Maximum number of evaluation steps (-1 for unlimited)')
+
+    parser.add_argument('--project_name', '-pn', type=str, default='transformer-accelerate', help='Wandb project name')
+    parser.add_argument('--run_name', '-rn', type=str_or_none, default=None, help='Wandb run name')
+
+    parser.add_argument('--tokenizer-path', '-tp', type=str, default='bert-base-uncased', help='Path to the tokenizer')
+
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = parse_args()
+
     wandb.login()
+
     accelerator = Accelerator()
-    tokenizer_path = 'bert-base-uncased'
+    tokenizer_path = args.tokenizer_path
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
     transformer_config = {
@@ -151,49 +241,57 @@ if __name__ == "__main__":
     transformer_config = Namespace(**transformer_config)
 
     config = {
-        "train_batch_size": 16,
-        "valid_batch_size": 16,
+        "train_batch_size": args.train_batch_size,
+        "valid_batch_size": args.valid_batch_size,
         "weight_decay": 0.1,
         "shuffle_buffer": 1000,
         "learning_rate": transformer_config.emb_size ** (-0.5),
         "lr_scheduler_type": "cosine",
         "num_warmup_steps": 750,
-        "gradient_accumulation_steps": 8,
-        "max_train_steps": -1,
-        "max_eval_steps": -1,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "max_train_steps": args.max_train_steps,
+        "max_eval_steps": args.max_eval_steps,
         "seq_length": 512,
         "seed": 1,
-        "save_checkpoint_steps": 8 * 100,
-        "train_size": None,
-        "valid_size": None,
+        "save_checkpoint_steps": args.save_checkpoint_steps,
+        "train_size": args.dataset_train_size,
+        "valid_size": args.dataset_valid_size,
+        "starting_step": 1
     }
-    args = Namespace(**config)
+    train_args = Namespace(**config)
+    train_args.save_checkpoint_dir = args.checkpoint_dir
 
     datamanager = DataPreprocessing(
         tokenizer,
-        batch_size=args.train_batch_size,
+        batch_size=train_args.train_batch_size,
         max_length=512,
         dataset_kwargs={'path': 'wmt14', 'name': 'de-en'},
         kwargs={}
     )
 
-    train_dataloader = get_dataloader(datamanager, 'train', size=args.train_size)
-    val_dataloader = get_dataloader(datamanager, 'validation', size=args.valid_size)
+    train_dataloader = get_dataloader(datamanager, 'train', size=train_args.train_size)
+    val_dataloader = get_dataloader(datamanager, 'validation', size=train_args.valid_size)
 
-    set_seed(args.seed)
+    set_seed(train_args.seed)
 
     st = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    logger, run_name = setup_logging("transformer-accelerate", f"logs/transformer-accelerate-{st}.log")
+    logger, run_name = setup_logging(
+        "transformer-accelerate", log_file=f"logs/transformer-accelerate-{st}.log", run_name=None,)
     logger.info(accelerator.state)
 
     model = get_model(transformer_config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=transformer_config.emb_size ** (-0.5), betas=(0.9, 0.98),
                                   eps=1e-9)
-    scheduler = get_lr_scheduler(optimizer, args.num_warmup_steps)
+    scheduler = get_lr_scheduler(optimizer, train_args.num_warmup_steps)
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id, reduction='mean')
+
+    last_chckpt = find_last_checkpoint(args.checkpoint_dir)
+    model, optimizer, scheduler, step = load_checkpoint(model, optimizer, scheduler, last_chckpt)
+    train_args.starting_step = step
 
     model, optimizer, train_dataloader, val_dataloader = accelerator.prepare(
         model, optimizer, train_dataloader, val_dataloader
     )
 
-    train(model, optimizer, scheduler, loss_fn, train_dataloader, val_dataloader, args)
+    logger.info(f'Starting training from step {train_args.starting_step}')
+    train(model, optimizer, scheduler, loss_fn, train_dataloader, val_dataloader, train_args)
