@@ -91,8 +91,14 @@ def train(model, optimizer, scheduler, loss_fn, train_loader, val_loader, args):
         loss = loss / args.gradient_accumulation_steps
         accelerator.backward(loss)
 
-        log_metrics(step, {'lr': get_lr(), 'samples': samples_per_step * step, 'steps': completed_steps,
-                           'loss/train': loss.item()})
+        log_metrics(step, {
+            'lr': get_lr(),
+            'samples': samples_per_step * step,
+            'steps': completed_steps,
+            'loss/train': loss.item(),
+            'batch_tokens_enc': src.numel(),
+            'batch_tokens_dec': trg.numel(),
+        })
 
         if step % args.gradient_accumulation_steps == 0:
             optimizer.step()
@@ -103,7 +109,12 @@ def train(model, optimizer, scheduler, loss_fn, train_loader, val_loader, args):
         if step % args.save_checkpoint_steps == 0:
             logger.info('Evalating and saving model')
             eval_loss, perplexity = evaluate(model, val_loader, loss_fn)
-            log_metrics(step, {'loss/eval': eval_loss, 'perplexity/eval': perplexity})
+            log_metrics(step, {
+                'loss/eval': eval_loss,
+                'perplexity/eval': perplexity,
+                'batch_tokens_enc': src.numel(),
+                'batch_tokens_dec': trg.numel(),
+            })
             accelerator.wait_for_everyone()
             unwrapped_model = accelerator.unwrap_model(model)
             if accelerator.is_main_process:
