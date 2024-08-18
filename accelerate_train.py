@@ -79,7 +79,7 @@ def evaluate(model, val_dataloader, loss_fn):
 
 def train(model, optimizer, scheduler, loss_fn, train_loader, val_loader, args):
     model.train()
-    completed_steps = args.starting_step // args.gradient_accumulation_steps
+    completed_steps = args.completed_steps
     samples_per_step = accelerator.state.num_processes * args.train_batch_size
     for step, batch in enumerate(train_loader, start=args.starting_step):
         src = batch['input_ids_en']
@@ -118,11 +118,11 @@ def train(model, optimizer, scheduler, loss_fn, train_loader, val_loader, args):
             accelerator.wait_for_everyone()
             unwrapped_model = accelerator.unwrap_model(model)
             if accelerator.is_main_process:
-                save_checkpoint(unwrapped_model, optimizer, scheduler, completed_steps,
+                save_checkpoint(unwrapped_model, optimizer, scheduler, step, completed_steps,
                                 path=f'{train_args.save_checkpoint_dir}/checkpoint-{step}.pt')
             model.train()
 
-        if completed_steps >= args.max_train_steps > 0:
+        if step >= args.starting_step + args.max_train_steps > 0:
             break
 
     logger.info('Evalating and saving model after training')
@@ -132,15 +132,16 @@ def train(model, optimizer, scheduler, loss_fn, train_loader, val_loader, args):
     unwrapped_model = accelerator.unwrap_model(model)
     if accelerator.is_main_process:
         save_checkpoint(
-            unwrapped_model, optimizer, scheduler, completed_steps,
+            unwrapped_model, optimizer, scheduler, step, completed_steps,
             path=f'{train_args.save_checkpoint_dir}/checkpoint-{step}.pt')
 
 
-def save_checkpoint(model, optimizer, scheduler, completed_steps, path=None):
-    path = f'checkpoints/checkpoint-{completed_steps}.pt' if path is None else path
+def save_checkpoint(model, optimizer, scheduler, step, completed_steps, path=None):
+    path = f'checkpoints/checkpoint-{step}.pt' if path is None else path
     if accelerator.is_main_process:
         torch.save({
-            'step': completed_steps,
+            'step': step,
+            'completed_steps': completed_steps,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
@@ -149,6 +150,7 @@ def save_checkpoint(model, optimizer, scheduler, completed_steps, path=None):
 
 def load_checkpoint(model, optimizer, scheduler, path):
     step = 1
+    completed_steps = 0
     if path is not None:
         logger.info(f'Loading checkpoint from {path}')
         checkpoint = torch.load(path)
@@ -156,7 +158,8 @@ def load_checkpoint(model, optimizer, scheduler, path):
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         step = checkpoint['step'] + 1
-    return model, optimizer, scheduler, step
+        # completed_steps = checkpoint['completed_steps'] + 1
+    return model, optimizer, scheduler, step, completed_steps
 
 
 def find_last_checkpoint(checkpoint_dir):
@@ -242,12 +245,16 @@ if __name__ == "__main__":
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id, reduction='mean')
 
     last_chckpt = find_last_checkpoint(args.checkpoint_dir)
-    model, optimizer, scheduler, step = load_checkpoint(model, optimizer, scheduler, last_chckpt)
+    model, optimizer, scheduler, step, completed_steps = load_checkpoint(model, optimizer, scheduler, last_chckpt)
     train_args.starting_step = step
+    train_args.completed_steps = completed_steps
 
     model, optimizer, train_dataloader, val_dataloader = accelerator.prepare(
         model, optimizer, train_dataloader, val_dataloader
     )
+
+    # Because of modification in checkpoints
+    train_args.starting_step, train_args.completed_steps = 15201, 1900
 
     logger.info(f'Starting training from step {train_args.starting_step}')
     train(model, optimizer, scheduler, loss_fn, train_dataloader, val_dataloader, train_args)
