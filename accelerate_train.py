@@ -26,7 +26,7 @@ def setup_logging(project_name, run_name=None, log_file=None):
     logger = logging.getLogger(__name__)
 
     if accelerator.is_main_process:
-        wandb.init(project=project_name, config=train_args, name=run_name)
+        wandb.init(project=project_name, config=train_args, name=run_name, id=args.run_id, resume=args.run_resume)
         run_name = wandb.run.name
         logger.setLevel(logging.INFO)
         datasets.utils.logging.set_verbosity_warning()
