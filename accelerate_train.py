@@ -183,6 +183,7 @@ if __name__ == "__main__":
     wandb.login()
 
     accelerator = Accelerator()
+
     tokenizer_path = args.tokenizer_path
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
@@ -220,6 +221,11 @@ if __name__ == "__main__":
     train_args = Namespace(**config)
     train_args.save_checkpoint_dir = args.checkpoint_dir
 
+    st = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    logger, run_name = setup_logging(
+        "transformer-accelerate", log_file=f"logs/transformer-accelerate-{st}.log", run_name=args.run_name, )
+    logger.info(accelerator.state)
+
     datamanager = DataPreprocessing(
         tokenizer,
         batch_size=train_args.train_batch_size,
@@ -232,11 +238,6 @@ if __name__ == "__main__":
     val_dataloader = get_dataloader(datamanager, 'validation', size=train_args.valid_size)
 
     set_seed(train_args.seed)
-
-    st = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    logger, run_name = setup_logging(
-        "transformer-accelerate", log_file=f"logs/transformer-accelerate-{st}.log", run_name=None,)
-    logger.info(accelerator.state)
 
     model = get_model(transformer_config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=transformer_config.emb_size ** (-0.5), betas=(0.9, 0.98),
