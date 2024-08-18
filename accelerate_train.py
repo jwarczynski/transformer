@@ -1,4 +1,3 @@
-import argparse
 import os.path
 from datetime import datetime
 from accelerate import Accelerator
@@ -14,6 +13,7 @@ from train import get_model, get_lr_scheduler
 from accelerate.utils import set_seed
 
 from datamanager import DataPreprocessing, get_dataloader
+from utils import parse_args
 
 
 def setup_logging(project_name, run_name=None, log_file=None):
@@ -161,61 +161,6 @@ def find_last_checkpoint(checkpoint_dir):
     last_chckpt = os.path.join(checkpoint_dir, files[-1])
     logger.info(f'Found last checkpoint at {last_chckpt}')
     return last_chckpt
-
-
-def int_or_none(value):
-    if value == '' or value is None:
-        return None
-    return int(value)
-
-
-def str_or_none(value):
-    if value == '' or value is None:
-        return None
-    return value
-
-
-def dir_path(value, create=False):
-    if os.path.exists(value):
-        return value
-    if create:
-        os.makedirs(value, exist_ok=True)
-        return value
-    raise argparse.ArgumentTypeError(f"Directory {value} does not exist")
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument('--create_dirs', '-cds', action='store_true', default=True,
-                        help='Create directories if they do not exist')
-    parser.add_argument('--checkpoint_dir', '-cd', type=dir_path, default='checkpoints',
-                        help='Directory to save and load checkpoints')
-    parser.add_argument('--log-dir', '-ld', type=dir_path, default='logs', help='Directory to save logs')
-
-    parser.add_argument('--dataset_train_size', '-dts', type=int_or_none, default=16,
-                        help='Size of the training dataset')
-    parser.add_argument('--dataset_valid_size', '-dvs', type=int_or_none, default=16,
-                        help='Size of the validation dataset')
-
-    parser.add_argument('--train_batch_size', '-tbs', type=int, default=2, help='Batch size for training')
-    parser.add_argument('--valid_batch_size', '-vbs', type=int, default=2, help='Batch size for validation')
-    parser.add_argument('--gradient_accumulation_steps', '-gas', type=int, default=2,
-                        help='Number of steps to accumulate gradients')
-    parser.add_argument('--save_checkpoint_steps', '-scs', type=int, default=2 * 2,
-                        help='Number of steps to save a checkpoint')
-
-    parser.add_argument('--max_train_steps', '-mts', type=int, default=-1,
-                        help='Maximum number of training steps (-1 for unlimited)')
-    parser.add_argument('--max_eval_steps', '-mes', type=int, default=-1,
-                        help='Maximum number of evaluation steps (-1 for unlimited)')
-
-    parser.add_argument('--project_name', '-pn', type=str, default='transformer-accelerate', help='Wandb project name')
-    parser.add_argument('--run_name', '-rn', type=str_or_none, default=None, help='Wandb run name')
-
-    parser.add_argument('--tokenizer-path', '-tp', type=str, default='bert-base-uncased', help='Path to the tokenizer')
-
-    return parser.parse_args()
 
 
 if __name__ == "__main__":
