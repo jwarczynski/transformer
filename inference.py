@@ -2,6 +2,7 @@ import torch
 
 
 def translate(model, max_output_length, tokenizer, en_enstence, device):
+    model.to(device)
     model.eval()
 
     encoder_input_ids = tokenizer(en_enstence, return_tensors='pt').input_ids.to(device)
